@@ -60,7 +60,7 @@
         }
 
         canvas { display: block; cursor: crosshair; }
-        .btn-support { background: #FFDD00; color: black; }
+        .btn-support {background: #FFDD00; color: black; padding: 10px 16px; border-radius: 6px; border: none; cursor: pointer; font-weight: 600; text-decoration: none; font-size: 13px; display: flex; align-items: center; gap: 6px; }
         
         /* Loading Spinner */
         #loader { display: none; color: #007bff; font-weight: bold; margin-top: 10px;}
@@ -72,7 +72,6 @@
 
     <h1>Local PDF Redactor</h1>
     <p>Files stay on your device. Drag to select areas. <kbd>Ctrl+Z</kbd> to Undo.</p>
-        <a href="https://buymeacoffee.com/metallicode?new=1" target="_blank" class="btn-support">☕ Support</a>
 
     <div class="toolbar">
         <input type="file" id="file-input" accept="application/pdf" />
@@ -81,6 +80,8 @@
         <button id="btn-restore">Tool: Restore</button>
         <button id="btn-undo">Undo (Ctrl+Z)</button>
         <button id="btn-download" class="download" disabled>Download Image PDF</button>
+        <a href="https://buymeacoffee.com/metallicode?new=1" target="_blank" class="btn-support">☕ Support</a>
+
     </div>
 
     <div id="loader">Processing PDF...</div>
