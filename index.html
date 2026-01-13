@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Secure Local PDF Redactor</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #f4f4f9; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            padding: 20px; 
+        }
+        h1 { color: #333; margin-bottom: 5px; }
+        p { color: #666; margin-bottom: 20px; font-size: 0.9em; }
+
+        .toolbar {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            padding: 8px 16px;
+            border: 1px solid #ccc;
+            background: #fff;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        button:hover { background: #eee; }
+        
+        button.active {
+            background-color: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+
+        button.download {
+            background-color: #28a745;
+            color: white;
+            border-color: #28a745;
+            margin-left: 20px;
+        }
+        button.download:hover { background-color: #218838; }
+
+        #canvas-wrapper {
+            position: relative;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border: 1px solid #999;
+            background-color: #888; /* Backdrop for PDF */
+        }
+
+        canvas { display: block; cursor: crosshair; }
+        
+        /* Loading Spinner */
+        #loader { display: none; color: #007bff; font-weight: bold; margin-top: 10px;}
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+
+    <h1>Local PDF Redactor</h1>
+    <p>Files stay on your device. Drag to select areas. <kbd>Ctrl+Z</kbd> to Undo.</p>
+
+    <div class="toolbar">
+        <input type="file" id="file-input" accept="application/pdf" />
+        <div style="border-left:1px solid #ccc; height: 30px; margin: 0 5px;"></div>
+        <button id="btn-pixelate" class="active">Tool: Pixelate</button>
+        <button id="btn-restore">Tool: Restore</button>
+        <button id="btn-undo">Undo (Ctrl+Z)</button>
+        <button id="btn-download" class="download" disabled>Download Image PDF</button>
+    </div>
+
+    <div id="loader">Processing PDF...</div>
+
+    <div id="canvas-wrapper">
+        <canvas id="main-canvas"></canvas>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        
+        const canvas = document.getElementById('main-canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        
+        // Hidden canvas to hold the original "clean" PDF for restoration
+        const cleanCanvas = document.createElement('canvas');
+        const cleanCtx = cleanCanvas.getContext('2d');
+
+        let pdfDoc = null;
+        let scale = 1.5; // Render scale (2.0 is retina quality, but slower)
+        
+        // State Management
+        let currentTool = 'pixelate'; 
+        let isDragging = false;
+        let startX, startY;
+        let snapshot = null; // Stores canvas state before drag starts
+        
+        // History for Undo
+        let historyStack = []; 
+        const MAX_HISTORY = 20;
+
+        // --- 1. FILE HANDLING ---
+        document.getElementById('file-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file || file.type !== 'application/pdf') return;
+
+            document.getElementById('loader').style.display = 'block';
+            document.getElementById('btn-download').disabled = true;
+
+            const arrayBuffer = await file.arrayBuffer();
+            pdfDoc = await pdfjsLib.getDocument(arrayBuffer).promise;
+            
+            // For this demo, we only render Page 1. 
+            // In a full app, you'd add Next/Prev buttons.
+            renderPage(1);
+        });
+
+        async function renderPage(num) {
+            const page = await pdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: scale });
+
+            // Set dimensions
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            cleanCanvas.width = viewport.width;
+            cleanCanvas.height = viewport.height;
+
+            // Render to Clean Canvas (The Reference)
+            await page.render({ canvasContext: cleanCtx, viewport }).promise;
+
+            // Copy Clean to Main Canvas
+            ctx.drawImage(cleanCanvas, 0, 0);
+
+            // Reset History
+            historyStack = [];
+            saveState(); // Initial state
+            
+            document.getElementById('loader').style.display = 'none';
+            document.getElementById('btn-download').disabled = false;
+        }
+
+        // --- 2. TOOL LOGIC ---
+        document.getElementById('btn-pixelate').addEventListener('click', (e) => setTool('pixelate', e.target));
+        document.getElementById('btn-restore').addEventListener('click', (e) => setTool('restore', e.target));
+
+        function setTool(tool, btnElement) {
+            currentTool = tool;
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            if(btnElement) btnElement.classList.add('active');
+        }
+
+        // --- 3. MOUSE EVENTS (SELECTION BOX) ---
+        canvas.addEventListener('mousedown', (e) => {
+            if (!pdfDoc) return;
+            isDragging = true;
+            const rect = canvas.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+
+            // Save the image data BEFORE we start drawing the selection box
+            // This allows us to "clear" the box by restoring this image while dragging
+            snapshot = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            
+            // Restore the canvas to how it looked before dragging started
+            // This removes the "previous frame" of the selection box
+            ctx.putImageData(snapshot, 0, 0);
+
+            const rect = canvas.getBoundingClientRect();
+            const currentX = e.clientX - rect.left;
+            const currentY = e.clientY - rect.top;
+            const width = currentX - startX;
+            const height = currentY - startY;
+
+            // Draw the visual selection box
+            ctx.strokeStyle = currentTool === 'pixelate' ? 'red' : 'green';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 3]);
+            ctx.strokeRect(startX, startY, width, height);
+            
+            // Optional: semi-transparent fill to show selection area
+            ctx.fillStyle = currentTool === 'pixelate' ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 255, 0, 0.1)';
+            ctx.fillRect(startX, startY, width, height);
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (!isDragging) return;
+            isDragging = false;
+
+            // Restore clean state one last time to remove the border lines
+            ctx.putImageData(snapshot, 0, 0);
+
+            const rect = canvas.getBoundingClientRect();
+            const endX = e.clientX - rect.left;
+            const endY = e.clientY - rect.top;
+            
+            // Calculate actual rectangle (handle dragging backwards)
+            const x = Math.min(startX, endX);
+            const y = Math.min(startY, endY);
+            const w = Math.abs(endX - startX);
+            const h = Math.abs(endY - startY);
+
+            // Don't process accidental tiny clicks
+            if (w < 2 || h < 2) return;
+
+            // Apply the actual modification
+            if (currentTool === 'pixelate') {
+                applyPixelation(x, y, w, h);
+            } else {
+                applyRestore(x, y, w, h);
+            }
+
+            saveState(); // Save to history stack
+        });
+
+        // --- 4. EFFECTS ---
+        
+        function applyPixelation(x, y, w, h) {
+            // The Pixelation Trick: 
+            // Draw the area to a tiny canvas, then draw it back scaled up.
+            
+            const pixelFactor = 0.20; 
+            
+            // Create a temp canvas
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = w * pixelFactor;
+            tempCanvas.height = h * pixelFactor;
+            const tempCtx = tempCanvas.getContext('2d');
+
+            // Turn off smoothing to get the "blocky" look
+            tempCtx.imageSmoothingEnabled = false;
+            ctx.imageSmoothingEnabled = false;
+
+            // 1. Draw source area to temp canvas (shrunk)
+            tempCtx.drawImage(canvas, x, y, w, h, 0, 0, tempCanvas.width, tempCanvas.height);
+
+            // 2. Draw temp canvas back to main canvas (stretched)
+            ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, x, y, w, h);
+        }
+
+        function applyRestore(x, y, w, h) {
+            // Simply copy pixels from the "Clean" canvas to the "Main" canvas
+            ctx.drawImage(cleanCanvas, x, y, w, h, x, y, w, h);
+        }
+
+        // --- 5. UNDO SYSTEM ---
+        function saveState() {
+            // Push current full canvas state to history
+            if (historyStack.length >= MAX_HISTORY) historyStack.shift();
+            historyStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        }
+
+        function performUndo() {
+            if (historyStack.length <= 1) return; // Keep initial state
+            historyStack.pop(); // Remove current state
+            const previousState = historyStack[historyStack.length - 1]; // Peek previous
+            ctx.putImageData(previousState, 0, 0);
+        }
+
+        // Undo Button
+        document.getElementById('btn-undo').addEventListener('click', performUndo);
+
+        // Keyboard Shortcut (Ctrl+Z)
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                performUndo();
+            }
+        });
+
+        // --- 6. EXPORT ---
+        document.getElementById('btn-download').addEventListener('click', () => {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({
+                orientation: canvas.width > canvas.height ? 'l' : 'p',
+                unit: 'px',
+                format: [canvas.width, canvas.height]
+            });
+
+            // Convert canvas to JPEG Image
+            const imgData = canvas.toDataURL('image/jpeg', 0.85);
+            doc.addImage(imgData, 'JPEG', 0, 0, canvas.width, canvas.height);
+            doc.save('redacted_document.pdf');
+        });
+
+    </script>
+</body>
+</html>
